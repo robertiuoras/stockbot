@@ -13,3 +13,17 @@ requests
 typing-extensions
 yarl
 python-dotenv
+aiohttp
+async-timeout
+attrs
+certifi
+chardet
+discord.py
+finnhub-python
+idna
+multidict
+python-dotenv
+requests
+typing-extensions
+websockets
+yarl
