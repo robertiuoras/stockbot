@@ -1,5 +1,7 @@
 import datetime
 import time
+import ssl
+import certifi
 
 from ._config import FINNHUB_APIKEY, DISCORD_BOT_TOKEN, DISCORD_BOT_CHANNEL_IDS, IPO_POLLING_PERIOD
 from .finnhubhandler import FinnhubIPOHandler
@@ -13,7 +15,12 @@ from discord.ext.tasks import loop
 
 class IpoBot(commands.Bot):
     def __init__(self, command_prefix):
-        super().__init__(command_prefix=command_prefix, help_command=None)
+        # Define intents
+        intents = discord.Intents.default()
+        intents.message_content = True  # Required for reading message content in commands
+
+        # Pass intents to parent constructor
+        super().__init__(command_prefix=command_prefix, help_command=None, intents=intents)
 
         self.today = datetime.datetime.now()
         self.tomorrow = self.today + datetime.timedelta(days=1)
@@ -23,16 +30,33 @@ class IpoBot(commands.Bot):
         self.finnhub_handler = FinnhubIPOHandler(FINNHUB_APIKEY)
 
         @self.command()
-        async def ipocal(ctx, _from: str, to: str):
+        async def ipocal(ctx, _from: str, to: str = None):
             try:
-                ipo_list = self.finnhub_handler.get_ipo_calendar(_from, to)
+                # Handle "today" and "tomorrow"
+                if _from.lower() == "today":
+                    _from_date = self.today.strftime("%Y-%m-%d")
+                elif _from.lower() == "tomorrow":
+                    _from_date = self.tomorrow.strftime("%Y-%m-%d")
+                else:
+                    _from_date = _from
+
+                if to is None:
+                    to_date = _from_date
+                elif to.lower() == "today":
+                    to_date = self.today.strftime("%Y-%m-%d")
+                elif to.lower() == "tomorrow":
+                    to_date = self.tomorrow.strftime("%Y-%m-%d")
+                else:
+                    to_date = to
+
+                ipo_list = self.finnhub_handler.get_ipo_calendar(_from_date, to_date)
                 if ipo_list is not None:
                     msg = "IPO Calendar:\n"
                     for ipo in ipo_list:
                         msg += f"{ipo['date']}: (${ipo['symbol']}) {ipo['name'].lower().title()} expected at ${ipo['price']}\n"
                     await ctx.send(ctx.author.mention + "\n" + msg)
                 else:
-                    await ctx.send(ctx.author.mention + "\n" + f"No IPOs found {_from} - {to}")
+                    await ctx.send(ctx.author.mention + "\n" + f"No IPOs found {_from_date} - {to_date}")
             except Exception as exc:
                 msg = f'Error occurred when attempting to fetch the IPO calendar ({_from} - {to})'
                 log('ERROR', msg + f' - Error: {exc}')
@@ -72,13 +96,8 @@ class IpoBot(commands.Bot):
         async def forcestatus(ctx):
             await self.change_presence(status=discord.Status.online,
                                        activity=discord.Activity(type=discord.ActivityType.listening, name="$info"))
-
         # Moved to on_ready:
         # self.get_quotes.start()
-
-    # # IPO ALERT: Needs to have embed
-    # def ipo_alert_embed(channel):
-    #     pass
 
     async def on_ready(self):
         await self.change_presence(status=discord.Status.idle, activity=discord.Game('Initializing Bot...'))
@@ -116,27 +135,22 @@ class IpoBot(commands.Bot):
         log("INFO", f'Fetching price quotes for {quote_count} expected IPO(s) today...')
         start = time.time()
 
-        # SPEED UP CHECKS WITH AIOHTTP:
-        # https://discordpy.readthedocs.io/en/latest/faq.html#what-does-blocking-mean - USE AIOHTTP INSTEAD OF REQUESTS
         endpoint = "https://finnhub.io/api/v1/quote?symbol={}"
         headers = {"X-Finnhub-Token": FINNHUB_APIKEY}
-        # print(f"\nChecking {len(symbols)} symbols for price:")
+
+        ssl_context = ssl.create_default_context(cafile=certifi.where())  # <-- SSL fix added
+
         for ipo in self.finnhub_handler.expected_ipos:
             symbol = ipo['symbol']
             date = ipo['date']
             expected_price = ipo['expected_price']
             company_name = ipo['company_name']
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
                 async with session.get(endpoint.format(symbol), headers=headers) as quote:
                     if quote.status == 200:
                         quote_data = await quote.json()
                         current_price = quote_data['c']
 
-                        # --- For testing: --- #
-                        # print(f"{symbol} current price: {current_price}")
-                        # current_price = random.randint(0, 1000)
-
-                        # Check if the stock has a valid price:
                         if current_price > 0:
                             log("INFO", f"{symbol} HAS OPENED FOR TRADING!")
                             self.finnhub_handler.opened_ipos.append(ipo)
@@ -167,5 +181,4 @@ class IpoBot(commands.Bot):
         try:
             self.run(DISCORD_BOT_TOKEN)
         except Exception as exc:
-            # LOG.CRITICAL
             log("CRITICAL", f"Could not initialize the discord bot. Error Code: {exc}")
